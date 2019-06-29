@@ -3,10 +3,16 @@ import SwiftUI
 import Combine
 import CoreData
 
+public struct FetchedResultsSection<T> {
+  public let name: String?
+  public let indexTitle: String?
+  public let values: [T]
+}
+
 /// Sends all objects which match fetchRequest per demand.
 /// First demand will be send immediately, subsequent demands will be filled when there is an update in database.
 public struct FetchedResultsPublisher<FetchedValue: NSFetchRequestResult, ResultValue>: Publisher {
-  public typealias Output = [ResultValue]
+  public typealias Output = [FetchedResultsSection<ResultValue>]
   public typealias Failure = Error
 
   private let reducer: ValueReducer<FetchedValue, ResultValue>
@@ -63,7 +69,7 @@ private class FetchedResultsSubscription<FetchedValue: NSFetchRequestResult, Res
   private let cacheName: String?
   private let reducer: ValueReducer<FetchedValue, ResultValue>
   private let receiveCompletion: (Subscribers.Completion<Error>) -> Void
-  private let receiveValue: ([ResultValue]) -> Subscribers.Demand
+  private let receiveValue: ([FetchedResultsSection<ResultValue>]) -> Subscribers.Demand
 
   init(
     fetchRequest: NSFetchRequest<FetchedValue>,
@@ -72,7 +78,7 @@ private class FetchedResultsSubscription<FetchedValue: NSFetchRequestResult, Res
     sectionNameKeyPath: String?,
     cacheName: String?,
     receiveCompletion: @escaping (Subscribers.Completion<Error>) -> Void,
-    receiveValue: @escaping ([ResultValue]) -> Subscribers.Demand)
+    receiveValue: @escaping ([FetchedResultsSection<ResultValue>]) -> Subscribers.Demand)
   {
     self.state = .waitingForDemand
     self.fetchRequest = fetchRequest
@@ -117,6 +123,10 @@ private class FetchedResultsSubscription<FetchedValue: NSFetchRequestResult, Res
     }
   }
 
+  func cancel() {
+    state = .cancelled
+  }
+
   func controllerDidChangeContent(_ controller: NSFetchedResultsController<NSFetchRequestResult>) {
     guard case .observing = state else {
       return
@@ -124,15 +134,37 @@ private class FetchedResultsSubscription<FetchedValue: NSFetchRequestResult, Res
     receiveUpdatedValues()
   }
 
-  func receiveUpdatedValues() {
+  private func receiveUpdatedValues() {
     guard case .observing(let fetchedResultsController, let demand) = state else {
       return
     }
 
     let additionalDemand: Subscribers.Demand
-    if let fetchedValues = fetchedResultsController.fetchedObjects {
+    if let sections = fetchedResultsController.sections {
+      var convertedSections: [FetchedResultsSection<ResultValue>] = []
+      for section in sections {
+        if let sectionObjects = section.objects {
+          guard let objects = sectionObjects as? [FetchedValue] else {
+            preconditionFailure()
+          }
+
+          convertedSections.append(FetchedResultsSection(name: section.name,
+                                                         indexTitle: section.indexTitle,
+                                                         values: objects.compactMap(reducer.reduce)))
+        }
+        else {
+          convertedSections.append(FetchedResultsSection(name: section.name,
+                                                         indexTitle: section.indexTitle,
+                                                         values: []))
+        }
+      }
+      additionalDemand = receiveValue(convertedSections)
+    }
+    else if let fetchedValues = fetchedResultsController.fetchedObjects {
       let reducedValues = fetchedValues.compactMap(reducer.reduce)
-      additionalDemand = receiveValue(reducedValues)
+      additionalDemand = receiveValue([FetchedResultsSection(name: nil,
+                                                             indexTitle: nil,
+                                                             values: reducedValues)])
     }
     else {
       additionalDemand = receiveValue([])
@@ -148,7 +180,7 @@ private class FetchedResultsSubscription<FetchedValue: NSFetchRequestResult, Res
     }
   }
 
-  func receiveCompletion(_ completion: Subscribers.Completion<Error>) {
+  private func receiveCompletion(_ completion: Subscribers.Completion<Error>) {
     guard case .observing = state else {
       return
     }
@@ -156,9 +188,4 @@ private class FetchedResultsSubscription<FetchedValue: NSFetchRequestResult, Res
     state = .completed
     receiveCompletion(completion)
   }
-
-  func cancel() {
-    state = .cancelled
-  }
 }
-
